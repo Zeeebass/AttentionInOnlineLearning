@@ -1,0 +1,375 @@
+// --- Existing setup code remains unchanged ---
+fmode = "enable fixations";
+bmode = "enable blinks";
+epmode = "enable eyepos 90"; // enable eyepos 90: returns eye positions every 90 samples (1 sec)
+gmode = "enable gaze 1"; // enable gaze events
+host = "127.0.0.1";
+port = 8080;
+gazeableMargin = 50;
+let isPaused = true;
+
+//added these variables
+let blinkCount = 0; //see how many times
+let blinkHistory = [];
+let fixationCount = 0; //count
+let gazeHistory = []; // x,y again
+let isOnAttentionBarCount = 0; //counting, TODO: fix this one
+let isOnVideoCount = 0; //counting, TODO: fix this one
+
+let attentionScore = 150; // Initial attention score
+const maxAttention = 150;
+const lowAttentionThreshold = 30;
+
+// Set the event handlers for all gazeable objects
+$(".Gazeable").on("GazeEnter", handleGazeEnter);
+$(".Gazeable").on("GazeLeave", handleGazeLeave);
+// Set global fixation, blink, and eye position handlers
+$("body").on("Blink", handleBlink);
+$("body").on("Fixation", handleFixation);
+$("#continue").on("GazeClick", handleGazeClick);
+
+// $("body").on("EyePosition", handleEyePosition);
+
+let lastEventTime = Date.now(); // Track the last time an event occurred
+
+// Update lastEventTime whenever a relevant event occurs
+function handleGazeEnter(e) {
+  lastEventTime = Date.now(); // Reset the timer
+  $(this).css({ background: "red" });
+}
+
+function handleGazeLeave(e) {
+  lastEventTime = Date.now(); // Reset the timer
+}
+let attentionHistory = [];
+let lastGazeOnVideo = false;
+let lastGazeOnBar = false;
+let gazeShiftCounter = 0;
+let attentionTimeOnBarStart = 0;
+let gazeShiftToBarData = [];
+let isOffScreen = false;
+
+function trackGaze(x, y) {
+  let isLookingAtVideo = isOnVideo(x, y);
+  let isLookingAtBar = isOnBar(x, y);
+  let isCurrentlyOnScreen = isLookingAtVideo || isLookingAtBar;
+
+  if (isCurrentlyOnScreen) {
+    if (isOffScreen) {
+      isOffScreen = false;
+      let duration = Date.now() - offScreenStartTime;
+      gazeShiftOffscreen.push({ duration, timestamp: Date.now() });
+      console.log(`Returned to screen after ${duration}ms`);
+    }
+    lastGazeTime = Date.now();
+  } else {
+    if (!isOffScreen) {
+      isOffScreen = true;
+      offScreenStartTime = Date.now();
+      console.log("Gaze moved offscreen");
+    }
+  }
+
+  if (isLookingAtVideo && !lastGazeOnVideo) {
+    lastGazeOnVideo = true;
+    lastGazeOnBar = false;
+
+    if (attentionTimeOnBarStart > 0) {
+      let duration = Date.now() - attentionTimeOnBarStart;
+      gazeShiftToBarData.push({
+        shift: gazeShiftCounter,
+        duration: duration,
+        timestamp: Date.now(),
+      });
+      console.log(`Shifted back to video. Time on bar: ${duration}ms`);
+      attentionTimeOnBarStart = 0;
+    }
+  } else if (isLookingAtBar && lastGazeOnVideo) {
+    lastGazeOnBar = true;
+    lastGazeOnVideo = false;
+    attentionTimeOnBarStart = Date.now();
+    gazeShiftCounter++;
+    console.log(`Shifted to attention bar. Total shifts: ${gazeShiftCounter}`);
+  }
+}
+
+// Tracking last known gaze position
+let lastGazeX = 0;
+let lastGazeY = 0;
+let lastBlinkTime = 0;
+
+function handleBlink(e) {
+  if (isPaused) return;
+  lastEventTime = Date.now();
+  blinkCount++;
+
+  let currentTime = Date.now(); // Get the current time
+  let timeSinceLastBlink = currentTime - lastBlinkTime; // Calculate the time since the last blink
+
+  lastBlinkTime = currentTime;
+
+  blinkHistory.push({
+    timeSinceLastBlink: timeSinceLastBlink,
+    lastGazeX: lastGazeX,
+    lastGazeY: lastGazeY,
+    timestamp: Date.now(),
+  });
+
+  let isLookingAtVideo = isOnVideo(lastGazeX, lastGazeY);
+  if (isLookingAtVideo) {
+    if (timeSinceLastBlink >= 1500) {
+      // average is 2500 per blink
+      setAttentionScore(3);
+    } else {
+      switch (true) {
+        case timeSinceLastBlink < 500:
+          setAttentionScore(-9);
+          break;
+        case timeSinceLastBlink < 1000:
+          setAttentionScore(-4);
+          break;
+        case timeSinceLastBlink < 1500:
+          setAttentionScore(-2);
+          break;
+      }
+    }
+
+    // If long duration of blinking, decrease attention
+    if (e.duration > 600) {
+      setAttentionScore(-6);
+    }
+  } else {
+    // Introduce a delay before reducing attention score
+    setTimeout(() => {
+      if (!isOnVideo(lastGazeX, lastGazeY)) {
+        // Recheck gaze position after delay
+        setAttentionScore(-4);
+        updateAttentionBar();
+      }
+    }, 1500); //added delay, change this number to change delay
+
+    return; // Prevent immediate execution
+  }
+
+  updateAttentionBar();
+}
+
+function handleFixation(e) {
+  if (isPaused) return;
+  lastEventTime = Date.now(); // Reset the timer
+  fixationCount++; //added this
+
+  let currentFixation = {
+    x: e.position.left,
+    y: e.position.top,
+    duration: e.duration,
+    timestamp: Date.now(),
+  };
+  gazeHistory.push(currentFixation); //till this
+
+  const currentGazeX = e.position.left;
+  const currentGazeY = e.position.top;
+
+  // Store the current gaze position
+  lastGazeX = currentGazeX;
+  lastGazeY = currentGazeY;
+  trackGaze(lastGazeX, lastGazeY);
+  // Set a timeout to check the gaze position again after 1 second
+  let isLookingAtVideo = isOnVideo(lastGazeX, lastGazeY);
+  if (isLookingAtVideo) {
+    isOnVideoCount++;
+    setTimeout(() => {
+      if (lastGazeX !== null && lastGazeY !== null) {
+        const distance = Math.sqrt(
+          Math.pow(currentGazeX - lastGazeX, 2) +
+            Math.pow(currentGazeY - lastGazeY, 2)
+        );
+        if (distance <= 20) {
+          // If the gaze is still within 50 pixels, award 5 points
+          setAttentionScore(3);
+          updateAttentionBar();
+        }
+      }
+    }, 1000); // 1000ms = 1 second
+  } else {
+    isOnAttentionBarCount++;
+    //TODO: Redo this part to have a small delay before executiong
+    // If not looking at the video, penalize the attention score
+    setAttentionScore(-2);
+    updateAttentionBar();
+  }
+}
+
+// Handle Eye Position Events
+// function handleEyePosition(e) {
+//     $("#eyeposdisplay").append(`\nPosition on ${e.time}: \n Left eye: (${e.lx},${e.ly},${e.lz}), \n Right eye: (${e.rx},${e.ry},${e.rz});`);
+//     let cursorPosition = $("#eyeposdisplay").prop("selectionStart");
+//     $("#eyeposdisplay").scrollTop(cursorPosition);
+// }
+
+// Check if gaze is inside video container
+function isOnVideo(x, y) {
+  let video = document.getElementById("videoContainer").getBoundingClientRect();
+  return x > video.left && x < video.right && y > video.top && y < video.bottom;
+}
+
+function isOnBar(x, y) {
+  let Bar = document.getElementById("testBar").getBoundingClientRect();
+  return x > Bar.left && x < Bar.right && y > Bar.top && y < Bar.bottom;
+}
+
+
+let gazeShiftOffscreen = [];
+
+// Gradual decay if no events occur for 2.5 seconds
+let gazeGone = [];
+let gazeGoneCounter = 0;
+setInterval(() => {
+  if (isPaused) return;
+  let currentTime = Date.now(); // Get the current time
+
+  if (currentTime - lastEventTime >= 2000) {
+    gazeGone.push({
+      counter: gazeGoneCounter,
+      timestamp: Date.now(),
+      duration: currentTime - lastEventTime,
+      //Note this duration will always be between 2000 - 2200
+    });
+    gazeGoneCounter++;
+    // Check if 2.5 seconds have passed since the last event
+    setAttentionScore(-15);
+    console.log("Lose points for nothing");
+    updateAttentionBar();
+    //reset lastEventTime so that we dont get multiple reductions
+    lastEventTime = currentTime;
+  }
+}, 1500);
+
+let popupData = [];
+let popupCount = 0;
+let startTime;
+
+function showPopup() {
+  isPaused = true;
+  togglePlayPause();
+  document.getElementById("attentionPopup").style.display = "flex";
+  startTime = Date.now();
+  popupCount++;
+  updateTimer();
+}
+
+function hidePopup() {
+  togglePlayPause();
+  let elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1); // Convert to seconds
+  popupData.push({
+    popupNumber: popupCount,
+    timeToClose: elapsedTime,
+    timestamp: Date.now(),
+  });
+
+  document.getElementById("attentionPopup").style.display = "none";
+  isPaused = false;
+  setAttentionScore(30); //seems like a nice number to restart and refocus
+}
+
+function updateTimer() {
+  if (document.getElementById("attentionPopup").style.display === "flex") {
+    setTimeout(updateTimer, 100);
+  }
+}
+
+function handleGazeClick() {
+  document.getElementById("continue").click(); // This fires the click event
+}
+
+function exportData() {
+  let participantID =
+    prompt(
+      "You finished the lecture. Please fill in the given Participant ID:"
+    ) || "unknown -- " + Date.now();
+  let data = {
+    participantID,
+    blinkCount,
+    blinkHistory,
+    fixationCount,
+    gazeHistory,
+    gazeShiftToBarData,
+    gazeShiftOffscreen,
+    attentionHistory,
+    popupHistory: popupData,
+  };
+  let blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  let a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${participantID}_Data.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+const video = document.getElementById("video");
+
+function togglePlayPause() {
+  if (video.paused) {
+    isPaused = false;
+    video.play();
+  } else {
+    isPaused = true;
+    video.pause();
+  }
+}
+
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape") {
+    togglePlayPause();
+    exportData();
+  }
+
+  video.addEventListener("timeupdate", function () {
+    if (video.duration - video.currentTime <= 2) {
+      exportData();
+    }
+  });
+
+  if (event.key === " ") {
+    isPaused = false;
+    event.preventDefault(); // Prevents the default scrolling when space is pressed
+    togglePlayPause();
+  }
+});
+
+function setAttentionScore(value) {
+  if (isPaused) return;
+  attentionScore = Math.max(0, attentionScore + value);
+ if(attentionScore > 150){
+ attentionScore = 150
+ }
+  attentionHistory.push({ score: attentionScore, timestamp: Date.now() });
+  if (attentionScore < 20) {
+    //showPopup();
+  }
+}
+
+
+// Update the attention bar UI
+function updateAttentionBar() {
+  if (isPaused) return;
+  let attentionBar = document.getElementById("attentionBar");
+
+  if (attentionScore < maxAttention / 2) {
+    red = 200;
+    green = Math.floor(300 * (attentionScore / maxAttention)); // 510 because half of it will reach 255
+  } else {
+    green = 200;
+    red = Math.floor(200 - 300 * (attentionScore / maxAttention - 0.5)); // Reduce red gradually
+  }
+  attentionBar.style.backgroundColor = `rgb(${Math.max(0, red)}, ${Math.max(
+    0,
+    green
+  )}, 0)`;
+
+  // DEBUG LINE:
+  //attentionBar.textContent = attentionScore;
+}
